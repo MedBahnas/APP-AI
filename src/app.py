@@ -1,0 +1,370 @@
+import os
+import streamlit as st
+from pathlib import Path
+import json
+from datetime import datetime
+
+from document_processor import DocumentProcessor
+from vector_store import VectorStore
+from chatbot import Chatbot, QuizGenerator
+
+# Configuration de la page
+st.set_page_config(
+    page_title="EduLLM - Assistant d'Apprentissage IA",
+    page_icon="🎓",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Styles CSS personnalisés
+st.markdown("""
+    <style>
+    .main {
+        max-width: 1200px;
+        padding: 2rem;
+    }
+    .chat-message {
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+        max-width: 80%;
+    }
+    .user-message {
+        background-color: #e3f2fd;
+        margin-left: auto;
+        margin-right: 0;
+    }
+    .assistant-message {
+        background-color: #f5f5f5;
+        margin-right: auto;
+        margin-left: 0;
+    }
+    .sidebar .sidebar-content {
+        background-color: #f8f9fa;
+    }
+    .stButton>button {
+        width: 100%;
+    }
+    .file-uploader {
+        border: 2px dashed #ccc;
+        border-radius: 0.5rem;
+        padding: 2rem;
+        text-align: center;
+        margin: 1rem 0;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Initialisation de la session
+if 'vector_store' not in st.session_state:
+    st.session_state.vector_store = VectorStore()
+    st.session_state.chatbot = Chatbot(st.session_state.vector_store)
+    st.session_state.quiz_generator = QuizGenerator(st.session_state.vector_store)
+    st.session_state.messages = []
+    st.session_state.uploaded_files = []
+    st.session_state.current_doc_id = None
+    st.session_state.quiz_data = None
+
+def display_chat_message(role, content):
+    """Affiche un message dans la conversation."""
+    with st.chat_message(role):
+        st.markdown(content)
+
+def display_chat_history():
+    """Affiche l'historique de la conversation."""
+    for message in st.session_state.messages:
+        role = "user" if message["role"] == "user" else "assistant"
+        display_chat_message(role, message["content"])
+
+def process_uploaded_files(uploaded_files):
+    """Traite les fichiers téléchargés par l'utilisateur."""
+    if not uploaded_files:
+        return []
+    
+    uploaded_file_paths = []
+    
+    for uploaded_file in uploaded_files:
+        # Créer le répertoire de téléchargement s'il n'existe pas
+        upload_dir = Path("data/uploads")
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Sauvegarder le fichier
+        file_path = upload_dir / uploaded_file.name
+        with open(file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        # Ajouter le document au vector store
+        try:
+            doc_id = st.session_state.vector_store.add_document(str(file_path))
+            st.session_state.current_doc_id = doc_id
+            uploaded_file_paths.append({
+                'name': uploaded_file.name,
+                'path': str(file_path),
+                'id': doc_id,
+                'size': f"{uploaded_file.size / 1024:.1f} KB"
+            })
+            st.success(f"Document traité avec succès: {uploaded_file.name}")
+        except Exception as e:
+            st.error(f"Erreur lors du traitement du fichier {uploaded_file.name}: {str(e)}")
+    
+    # Mettre à jour la liste des fichiers téléchargés
+    st.session_state.uploaded_files = uploaded_file_paths
+    return uploaded_file_paths
+
+def generate_quiz():
+    """Génère un quiz basé sur le document actuel ou un thème."""
+    # Vérifier si un document est sélectionné ou si un thème est fourni
+    doc_id = st.session_state.get('current_doc_id')
+    topic = st.session_state.get('quiz_topic', '')
+    
+    if not doc_id and not topic.strip():
+        st.warning("Veuillez d'abord télécharger un document ou spécifier un thème pour le quiz.")
+        return
+    
+    with st.spinner("Génération du quiz en cours..."):
+        try:
+            # Récupérer les paramètres du quiz depuis l'interface
+            num_questions = st.session_state.get('num_questions', 5)
+            difficulty = st.session_state.get('quiz_difficulty', 'moyen')
+            
+            # Générer le quiz
+            quiz_data = st.session_state.quiz_generator.generate_quiz(
+                topic=topic if topic.strip() else None,
+                doc_id=doc_id,
+                num_questions=num_questions,
+                difficulty=difficulty
+            )
+            
+            # Vérifier s'il y a une erreur dans la réponse
+            if isinstance(quiz_data, dict) and 'error' in quiz_data:
+                error_msg = quiz_data.get('error', 'Erreur inconnue')
+                details = quiz_data.get('details', '')
+                st.error(f"Erreur lors de la génération du quiz: {error_msg}")
+                if details:
+                    st.warning(f"Détails: {details}")
+                return
+            
+            # Vérifier la structure des données du quiz
+            if not isinstance(quiz_data, dict) or 'questions' not in quiz_data:
+                st.error("Format de quiz invalide reçu du générateur.")
+                return
+            
+            # Sauvegarder les données du quiz dans la session
+            st.session_state.quiz_data = quiz_data
+            st.session_state.show_quiz = True
+            
+            # Afficher un message de succès
+            st.success("Quiz généré avec succès !")
+            
+        except Exception as e:
+            st.error(f"Une erreur inattendue est survenue : {str(e)}")
+            st.warning("Veuillez réessayer ou contacter le support si le problème persiste.")
+
+def display_quiz():
+    """Affiche le quiz généré."""
+    if not st.session_state.get('quiz_data'):
+        return
+    
+    quiz = st.session_state.quiz_data
+    
+    st.markdown(f"## {quiz.get('title', 'Quiz')}")
+    st.markdown(f"*{quiz.get('description', '')}*")
+    st.markdown(f"**Difficulté :** {quiz.get('difficulty', 'Moyen').capitalize()}")
+    
+    if 'questions' in quiz and quiz['questions']:
+        st.markdown("### Questions")
+        
+        user_answers = {}
+        for i, question in enumerate(quiz['questions'], 1):
+            st.markdown(f"**{i}. {question['question']}**")
+            
+            # Afficher les options de réponse
+            options = question.get('options', {})
+            selected = st.radio(
+                f"Options pour la question {i}",
+                options=[f"{k}. {v}" for k, v in options.items()],
+                key=f"q_{i}",
+                index=None
+            )
+            
+            if selected:
+                user_answers[i] = selected[0]  # Stocker la lettre de la réponse
+                
+                # Afficher la correction si l'utilisateur a répondu
+                if user_answers[i] == question['correct_answer']:
+                    st.success("Correct !")
+                else:
+                    st.error(f"Incorrect. La bonne réponse est {question['correct_answer'].upper()}.")
+                
+                st.markdown(f"*Explication*: {question.get('explanation', 'Aucune explication disponible.')}")
+            
+            st.markdown("---")
+        
+        # Afficher le score si toutes les questions ont été répondues
+        if len(user_answers) == len(quiz['questions']):
+            correct = sum(1 for i, q in enumerate(quiz['questions'], 1) 
+                        if user_answers.get(i, '').startswith(q['correct_answer']))
+            score = (correct / len(quiz['questions'])) * 100
+            
+            st.markdown(f"### Résultat du quiz: {score:.1f}%")
+            st.progress(score / 100)
+            
+            if score >= 70:
+                st.balloons()
+                st.success("Félicitations ! Vous avez réussi le quiz ! 🎉")
+            else:
+                st.warning("Vous pouvez faire mieux ! N'hésitez pas à revoir le document et à réessayer.")
+    else:
+        st.warning("Aucune question n'a été générée pour ce quiz.")
+
+def main():
+    """Fonction principale de l'application."""
+    # Barre latérale
+    with st.sidebar:
+        st.title("📚 EduLLM")
+        st.markdown("*Votre assistant d'apprentissage intelligent*")
+        
+        st.markdown("---")
+        
+        # Téléchargement de documents
+        st.subheader("Documents")
+        uploaded_files = st.file_uploader(
+            "Téléchargez vos documents (PDF, TXT, DOCX, PPTX)",
+            type=["pdf", "txt", "docx", "pptx"],
+            accept_multiple_files=True,
+            key="file_uploader"
+        )
+        
+        if st.button("Traiter les documents"):
+            if uploaded_files:
+                with st.spinner("Traitement des documents..."):
+                    process_uploaded_files(uploaded_files)
+        
+        # Liste des documents téléchargés
+        if st.session_state.uploaded_files:
+            st.markdown("### Documents traités")
+            for file in st.session_state.uploaded_files:
+                with st.expander(f"📄 {file['name']}"):
+                    st.caption(f"Taille: {file['size']}")
+                    if st.button("Sélectionner", key=f"select_{file['id']}"):
+                        st.session_state.current_doc_id = file['id']
+                        st.experimental_rerun()
+        
+        st.markdown("---")
+        
+        # Options
+        st.subheader("Options")
+        if st.button("Nouvelle conversation"):
+            st.session_state.messages = []
+            st.session_state.chatbot.clear_history()
+            st.experimental_rerun()
+        
+        # Section de génération de quiz
+        st.markdown("---")
+        st.subheader("Générer un quiz")
+        
+        # Champ pour le thème du quiz
+        quiz_topic = st.text_input(
+            "Thème du quiz (optionnel si un document est sélectionné)",
+            key="quiz_topic",
+            help="Laissez vide pour générer un quiz basé sur le document sélectionné"
+        )
+        
+        # Sélecteur du nombre de questions
+        num_questions = st.slider(
+            "Nombre de questions",
+            min_value=3,
+            max_value=10,
+            value=5,
+            step=1,
+            key="num_questions"
+        )
+        
+        # Sélecteur de difficulté
+        difficulty = st.selectbox(
+            "Niveau de difficulté",
+            ["Facile", "Moyen", "Difficile"],
+            index=1,  # Moyen par défaut
+            key="quiz_difficulty"
+        )
+        
+        # Bouton de génération
+        if st.button("Générer le quiz", key="generate_quiz_btn"):
+            # Vérifier qu'au moins un document est sélectionné ou qu'un thème est fourni
+            if not st.session_state.get('current_doc_id') and not quiz_topic.strip():
+                st.warning("Veuillez sélectionner un document ou saisir un thème pour le quiz.")
+            else:
+                generate_quiz()
+        
+        # Afficher l'état actuel
+        if st.session_state.get('current_doc_id'):
+            current_doc = next((doc for doc in st.session_state.uploaded_files 
+                             if doc['id'] == st.session_state.current_doc_id), None)
+            if current_doc:
+                st.info(f"Document sélectionné: {current_doc['name']}")
+        
+        if quiz_topic.strip():
+            st.info(f"Thème du quiz: {quiz_topic}")
+            
+        st.markdown("---")
+        
+        st.markdown("---")
+        
+        # Aide et informations
+        st.markdown("### Aide")
+        st.markdown("""
+        - Téléchargez vos documents de cours
+        - Posez des questions sur le contenu
+        - Générez des quiz pour vous tester
+        """)
+    
+    # Contenu principal
+    st.title("💬 EduLLM - Assistant d'Apprentissage")
+    
+    # Afficher le quiz s'il est disponible
+    if st.session_state.get('show_quiz', False):
+        if st.button("Retour au chat"):
+            st.session_state.show_quiz = False
+            st.experimental_rerun()
+        display_quiz()
+        return
+    
+    # Afficher l'historique de la conversation
+    display_chat_history()
+    
+    # Zone de saisie pour les messages
+    if prompt := st.chat_input("Posez votre question ici..."):
+        # Ajouter le message de l'utilisateur
+        display_chat_message("user", prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Obtenir et afficher la réponse de l'assistant
+        with st.chat_message("assistant"):
+            with st.spinner("Réflexion en cours..."):
+                try:
+                    response = st.session_state.chatbot.process_query(prompt)
+                    st.markdown(response['response'])
+                    
+                    # Afficher les sources si disponibles
+                    if response.get('sources'):
+                        st.markdown("\n**Sources :**")
+                        for source in response['sources']:
+                            st.markdown(f"- {source}")
+                    
+                    # Ajouter la réponse à l'historique
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": response['response'],
+                        "sources": response.get('sources', [])
+                    })
+                except Exception as e:
+                    error_msg = f"Désolé, une erreur s'est produite : {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": error_msg,
+                        "error": True
+                    })
+
+if __name__ == "__main__":
+    main()

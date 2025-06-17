@@ -1,0 +1,8 @@
+EduLLM_ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.vscode/
+*.tmp
+*.swp
