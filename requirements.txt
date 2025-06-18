@@ -1,0 +1,10 @@
+streamlit
+openai
+python-dotenv
+PyPDF2
+python-docx
+python-pptx
+python-magic
+faiss-cpu
+sentence-transformers
+numpy
